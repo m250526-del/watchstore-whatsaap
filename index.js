@@ -25,12 +25,15 @@ let latestQr = null;
 
 const pendingOrdersCache = new Map();
 
-// ── Unified Phone Normalization Helper ────────────────────────────────────
+// ── Canonical Pakistani Phone Normalizer ──────────────────────────────────
 function normalizePakistaniPhone(phoneInput) {
   let digits = String(phoneInput || '').replace(/\D/g, '');
+  if (digits.startsWith('0092')) {
+    digits = digits.substring(2);
+  }
   if (digits.startsWith('0')) {
     digits = '92' + digits.substring(1);
-  } else if (digits.length === 10 && !digits.startsWith('92')) {
+  } else if (digits.length === 10 && digits.startsWith('3')) {
     digits = '92' + digits;
   }
   return digits;
@@ -101,27 +104,38 @@ async function savePendingOrder(orderData) {
         record.status,
       ]
     );
-    console.log(`✅ Saved pending order #${record.order_id} for normalized phone ${digits}`);
+    console.log(`✅ Saved pending order #${record.order_id} for canonical phone ${digits}`);
   } catch (err) {
     console.error('Failed to persist pending order:', err);
   }
 }
 
 async function getPendingOrder(phoneOrDigits) {
-  const digits = normalizePakistaniPhone(phoneOrDigits);
-  if (pendingOrdersCache.has(digits)) {
-    return pendingOrdersCache.get(digits);
+  const normalizedDigits = normalizePakistaniPhone(phoneOrDigits);
+  const rawInput = String(phoneOrDigits).replace(/\D/g, '');
+  const localFormat = normalizedDigits.startsWith('92') ? '0' + normalizedDigits.substring(2) : normalizedDigits;
+
+  // 1. Check in-memory cache
+  if (pendingOrdersCache.has(normalizedDigits)) {
+    return pendingOrdersCache.get(normalizedDigits);
   }
-  if (pendingOrdersCache.has(String(phoneOrDigits))) {
-    return pendingOrdersCache.get(String(phoneOrDigits));
+  if (pendingOrdersCache.has(rawInput)) {
+    return pendingOrdersCache.get(rawInput);
   }
+  if (pendingOrdersCache.has(localFormat)) {
+    return pendingOrdersCache.get(localFormat);
+  }
+
+  // 2. Query PostgreSQL Database (supports canonical 923..., local 03..., raw input, and order_id)
   try {
     const res = await pgPool.query(
-      `SELECT * FROM pending_orders WHERE phone = $1 OR order_id = $1 ORDER BY created_at DESC LIMIT 1`,
-      [digits]
+      `SELECT * FROM pending_orders WHERE phone = $1 OR phone = $2 OR phone = $3 OR order_id = $3 ORDER BY created_at DESC LIMIT 1`,
+      [normalizedDigits, localFormat, rawInput]
     );
     if (res.rows.length > 0) {
       const row = res.rows[0];
+      // Index in cache under canonical normalized format and row fields for future instant hits
+      pendingOrdersCache.set(normalizedDigits, row);
       pendingOrdersCache.set(row.phone, row);
       pendingOrdersCache.set(row.order_id, row);
       return row;
@@ -396,17 +410,22 @@ async function startBaileys() {
 
       const isImage = !!msg.message?.imageMessage;
 
-      // Lookup pending order with unified normalization
+      // Diagnostic logging before lookup
+      console.log('[WA CONFIRM DEBUG]', {
+        fromJid,
+        normalizedPhone: senderPhone,
+        textContent
+      });
+
+      // Lookup pending order with canonical normalization & database fallback
       const pendingOrder = await getPendingOrder(senderPhone);
 
+      console.log('[WA CONFIRM DEBUG] pending order:', pendingOrder
+        ? pendingOrder.order_id
+        : 'NOT FOUND'
+      );
+
       if (!pendingOrder) {
-        console.warn('⚠️ NO PENDING ORDER FOUND FOR INCOMING WHATSAPP MESSAGE:', {
-          fromJid,
-          senderPhone,
-          textContent,
-          selectedButtonId,
-          availableCacheKeys: Array.from(pendingOrdersCache.keys())
-        });
         continue;
       }
 
