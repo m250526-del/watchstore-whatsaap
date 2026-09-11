@@ -105,11 +105,26 @@ async function startBaileys() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  if (!sock.authState.creds.registered) {
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(process.env.PRIMARY_NUMBER);
+        console.log('\n==================================');
+        console.log('WHATSAPP PAIRING CODE:', code);
+        console.log('On your phone: WhatsApp > Settings > Linked Devices >');
+        console.log('Link a Device > "Link with phone number instead" > enter this code.');
+        console.log('==================================\n');
+      } catch (err) {
+        console.error('Failed to request pairing code:', err);
+      }
+    }, 3000);
+  }
+
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log('\nScan this QR code with WhatsApp (Linked Devices):\n');
+      console.log('\n(QR also available, but use the pairing code above if this looks garbled)\n');
       qrcode.generate(qr, { small: true });
     }
 
