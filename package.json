@@ -1,0 +1,19 @@
+{
+  "name": "watchstore-whatsapp",
+  "version": "1.0.0",
+  "description": "Baileys-based WhatsApp order verification server for WatchStore",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "pino": "^9.2.0",
+    "qrcode-terminal": "^0.12.0",
+    "uuid": "^14.0.2"
+  }
+}
