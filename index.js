@@ -25,6 +25,22 @@ let latestQr = null;
 
 const pendingOrdersCache = new Map();
 
+// ── Unified Phone Normalization Helper ────────────────────────────────────
+function normalizePakistaniPhone(phoneInput) {
+  let digits = String(phoneInput || '').replace(/\D/g, '');
+  if (digits.startsWith('0')) {
+    digits = '92' + digits.substring(1);
+  } else if (digits.length === 10 && !digits.startsWith('92')) {
+    digits = '92' + digits;
+  }
+  return digits;
+}
+
+function normalizeToJid(phone) {
+  const digits = normalizePakistaniPhone(phone);
+  return `${digits}@s.whatsapp.net`;
+}
+
 async function initDb() {
   try {
     await pgPool.query(`
@@ -48,7 +64,7 @@ initDb();
 
 async function savePendingOrder(orderData) {
   const { orderId, phone, customerName, amount, paymentMethod, paymentDetails } = orderData;
-  const digits = String(phone).replace(/\D/g, '');
+  const digits = normalizePakistaniPhone(phone);
 
   const record = {
     order_id: String(orderId),
@@ -85,15 +101,19 @@ async function savePendingOrder(orderData) {
         record.status,
       ]
     );
+    console.log(`✅ Saved pending order #${record.order_id} for normalized phone ${digits}`);
   } catch (err) {
     console.error('Failed to persist pending order:', err);
   }
 }
 
 async function getPendingOrder(phoneOrDigits) {
-  const digits = String(phoneOrDigits).replace(/\D/g, '');
+  const digits = normalizePakistaniPhone(phoneOrDigits);
   if (pendingOrdersCache.has(digits)) {
     return pendingOrdersCache.get(digits);
+  }
+  if (pendingOrdersCache.has(String(phoneOrDigits))) {
+    return pendingOrdersCache.get(String(phoneOrDigits));
   }
   try {
     const res = await pgPool.query(
@@ -179,6 +199,7 @@ async function handleOrderConfirmation(pendingOrder, fromJid) {
       `براہِ کرم ادائیگی کرنے کے بعد ادائیگی کی رسید کا اسکرین شاٹ اسی WhatsApp پر بھیج دیں۔`;
 
     await sock.sendMessage(fromJid, { text: msg2Advance });
+    console.log(`✅ Message #2 (Advance Payment) sent to ${fromJid} for order #${pendingOrder.order_id}`);
   } else {
     // COD Message #2
     const msg2Cod =
@@ -189,6 +210,7 @@ async function handleOrderConfirmation(pendingOrder, fromJid) {
       `آپ کا Cash on Delivery آرڈر اب پروسیس کیا جائے گا۔`;
 
     await sock.sendMessage(fromJid, { text: msg2Cod });
+    console.log(`✅ Message #2 (COD) sent to ${fromJid} for order #${pendingOrder.order_id}`);
   }
 }
 
@@ -280,15 +302,16 @@ app.post('/api/send-verification', async (req, res) => {
     ];
 
     try {
-      // Send interactive quick-reply button via Baileys 6.7.9
+      console.log(`Sending interactive button Message #1 to ${result.jid}...`);
       await sock.sendMessage(result.jid, {
         text: msg1Text,
         buttons: buttons,
         headerType: 1,
       });
+      console.log(`✅ Interactive Message #1 sent to ${result.jid}`);
     } catch (btnErr) {
-      console.warn('Interactive button delivery warning, falling back to text:', btnErr);
-      await sock.sendMessage(result.jid, { text: msg1Text });
+      console.error('❌ INTERACTIVE BUTTON SEND FAILED:', btnErr);
+      throw btnErr; // Do NOT swallow error; re-throw so full stack trace is visible in Render logs
     }
 
     return res.json({ success: true, reason: 'sent' });
@@ -302,11 +325,6 @@ app.post('/api/send-verification', async (req, res) => {
     });
   }
 });
-
-function normalizeToJid(phone) {
-  const digits = String(phone).replace(/\D/g, '');
-  return digits.includes('@') ? digits : `${digits}@s.whatsapp.net`;
-}
 
 async function startBaileys() {
   const { state, saveCreds } = await usePostgresAuthState(pgPool, 'watchstore_session');
@@ -360,7 +378,7 @@ async function startBaileys() {
       const fromJid = msg.key.remoteJid;
       if (!fromJid || !fromJid.endsWith('@s.whatsapp.net')) continue;
 
-      const cleanPhone = fromJid.replace('@s.whatsapp.net', '');
+      const senderPhone = normalizePakistaniPhone(fromJid);
 
       // Parse interactive button responses across Baileys payload variations
       const selectedButtonId =
@@ -378,8 +396,19 @@ async function startBaileys() {
 
       const isImage = !!msg.message?.imageMessage;
 
-      const pendingOrder = await getPendingOrder(cleanPhone);
-      if (!pendingOrder) continue;
+      // Lookup pending order with unified normalization
+      const pendingOrder = await getPendingOrder(senderPhone);
+
+      if (!pendingOrder) {
+        console.warn('⚠️ NO PENDING ORDER FOUND FOR INCOMING WHATSAPP MESSAGE:', {
+          fromJid,
+          senderPhone,
+          textContent,
+          selectedButtonId,
+          availableCacheKeys: Array.from(pendingOrdersCache.keys())
+        });
+        continue;
+      }
 
       // 1. Button Response Detection
       const isButtonConfirm =
@@ -404,6 +433,7 @@ async function startBaileys() {
         textContent.includes('تصدیق');
 
       if ((isButtonConfirm || isYesConfirm || isUrduConfirm) && pendingOrder.status === 'pending_confirmation') {
+        console.log(`📩 Valid order confirmation received via ${isButtonConfirm ? 'BUTTON' : isYesConfirm ? 'TYPED YES' : 'URDU TEXT'} for order #${pendingOrder.order_id}`);
         // Execute unified confirmation handler
         await handleOrderConfirmation(pendingOrder, fromJid);
       } else if (isImage && pendingOrder.status === 'confirmed') {
