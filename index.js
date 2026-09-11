@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const pino = require('pino');
 const {
   default: makeWASocket,
@@ -12,7 +12,7 @@ const { Pool } = require('pg');
 
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // required for Neon
+  ssl: { rejectUnauthorized: false },
 });
 
 const PORT = process.env.PORT || 3000;
@@ -21,12 +21,13 @@ const SECONDARY_NUMBER = process.env.SECONDARY_NUMBER;
 
 let sock = null;
 let connectionState = 'connecting';
+let latestQr = null;
 
 const app = express();
 app.use(express.json());
 
 app.use((req, res, next) => {
-  if (req.path === '/health') return next();
+  if (req.path === '/health' || req.path === '/qr') return next();
   const key = req.header('X-API-Key');
   if (!key || key !== API_KEY) {
     return res.status(401).json({ success: false, reason: 'unauthorized' });
@@ -36,6 +37,18 @@ app.use((req, res, next) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', whatsapp: connectionState });
+});
+
+app.get('/qr', async (req, res) => {
+  if (!latestQr) {
+    return res.status(404).send('No QR code available right now (already connected, or not generated yet — check back in a few seconds).');
+  }
+  try {
+    const png = await QRCode.toBuffer(latestQr, { width: 400, margin: 2 });
+    res.type('png').send(png);
+  } catch (err) {
+    res.status(500).send('Failed to render QR code.');
+  }
 });
 
 app.post('/api/send-verification', async (req, res) => {
@@ -105,31 +118,17 @@ async function startBaileys() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  if (!sock.authState.creds.registered) {
-    setTimeout(async () => {
-      try {
-        const code = await sock.requestPairingCode(process.env.PRIMARY_NUMBER);
-        console.log('\n==================================');
-        console.log('WHATSAPP PAIRING CODE:', code);
-        console.log('On your phone: WhatsApp > Settings > Linked Devices >');
-        console.log('Link a Device > "Link with phone number instead" > enter this code.');
-        console.log('==================================\n');
-      } catch (err) {
-        console.error('Failed to request pairing code:', err);
-      }
-    }, 3000);
-  }
-
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log('\n(QR also available, but use the pairing code above if this looks garbled)\n');
-      qrcode.generate(qr, { small: true });
+      latestQr = qr;
+      console.log('New QR generated — open the /qr URL of this service in a browser to scan it.');
     }
 
     if (connection === 'open') {
       connectionState = 'open';
+      latestQr = null;
       console.log('✅ WhatsApp connected.');
     }
 
