@@ -27,6 +27,8 @@
 
 'use strict';
 
+const { BufferJSON } = require('@whiskeysockets/baileys');
+
 // In-memory LRU-style cache to avoid hammering DB for hot messages
 // Key: "id:remoteJid", Value: full message object
 const memCache = new Map();
@@ -96,7 +98,7 @@ function createMessageStore(pool) {
       }
       memCache.set(cacheKey, msg);
 
-      const payload = JSON.stringify(msg);
+      const payload = JSON.stringify(msg, BufferJSON.replacer);
 
       await pool.query(
         `INSERT INTO whatsapp_messages (msg_id, remote_jid, payload)
@@ -140,7 +142,7 @@ function createMessageStore(pool) {
 
       if (res.rows.length === 0) return undefined;
 
-      const msg = JSON.parse(res.rows[0].payload);
+      const msg = JSON.parse(res.rows[0].payload, BufferJSON.reviver);
 
       // Warm memory cache for future retries
       memCache.set(cacheKey, msg);

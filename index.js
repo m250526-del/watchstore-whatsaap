@@ -51,7 +51,7 @@ function normalizeToJid(phone) {
 }
 
 // ── Message store (for Baileys retry delivery) ───────────────────────────
-let messageStore = null;
+const messageStore = createMessageStore(pgPool);
 
 async function initDb() {
   try {
@@ -69,9 +69,7 @@ async function initDb() {
     `);
     console.log('✅ pending_orders table initialized.');
 
-    // Initialise message store table and create the store instance
     await initMessageStore(pgPool);
-    messageStore = createMessageStore(pgPool);
   } catch (err) {
     console.error('Database initialization error:', err);
   }
@@ -357,25 +355,28 @@ async function startBaileys() {
   const { state, saveCreds } = await usePostgresAuthState(pgPool, 'watchstore_session');
   const { version } = await fetchLatestBaileysVersion();
 
-  // Use CacheableSignalKeyStore if available (reduces DB calls for signal keys)
-  const authState = typeof makeCacheableSignalKeyStore === 'function'
-    ? { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) }
-    : state;
-
   sock = makeWASocket({
     version,
-    auth: authState,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(
+        state.keys,
+        pino({ level: 'silent' })
+      ),
+    },
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    // ── Delivery reliability ─────────────────────────────────────────────
-    // Tracks retry attempts per message; Baileys uses this to back off
+
+    markOnlineOnConnect: false,
+
     msgRetryCounterCache,
-    // Allows Baileys to re-send the original payload when retrying
+
+    enableRecentMessageCache: true,
+
+    enableAutoSessionRecreation: true,
+
     getMessage: async (key) => {
-      if (messageStore) {
-        return messageStore.getMessage(key);
-      }
-      return undefined;
+      return await messageStore.getMessage(key);
     },
   });
 
@@ -412,14 +413,12 @@ async function startBaileys() {
 
   // Incoming Message Listener (Detect Confirm Order button, typed YES / ہاں, and Screenshots)
   sock.ev.on('messages.upsert', async (m) => {
-    if (m.type !== 'notify') return;
 
-    // Persist all messages so Baileys can retry delivery on reconnect
-    if (messageStore) {
-      for (const msg of m.messages) {
-        await messageStore.saveMessage(msg);
-      }
+    for (const storedMessage of m.messages) {
+      await messageStore.saveMessage(storedMessage);
     }
+
+    if (m.type !== 'notify') return;
 
     for (const msg of m.messages) {
       if (!msg.message || msg.key.fromMe) continue;
