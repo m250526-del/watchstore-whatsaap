@@ -2,13 +2,19 @@ require('dotenv').config();
 const express = require('express');
 const QRCode = require('qrcode');
 const pino = require('pino');
+const NodeCache = require('node-cache');
 const {
   default: makeWASocket,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } = require('@whiskeysockets/baileys');
 const { usePostgresAuthState } = require('./postgresAuthState');
+const { initMessageStore, createMessageStore } = require('./messageStore');
 const { Pool } = require('pg');
+
+// Baileys retry counter — tracks how many times each message has been retried
+const msgRetryCounterCache = new NodeCache({ stdTTL: 60 * 60, useClones: false });
 
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -44,6 +50,9 @@ function normalizeToJid(phone) {
   return `${digits}@s.whatsapp.net`;
 }
 
+// ── Message store (for Baileys retry delivery) ───────────────────────────
+let messageStore = null;
+
 async function initDb() {
   try {
     await pgPool.query(`
@@ -59,6 +68,10 @@ async function initDb() {
       );
     `);
     console.log('✅ pending_orders table initialized.');
+
+    // Initialise message store table and create the store instance
+    await initMessageStore(pgPool);
+    messageStore = createMessageStore(pgPool);
   } catch (err) {
     console.error('Database initialization error:', err);
   }
@@ -344,11 +357,26 @@ async function startBaileys() {
   const { state, saveCreds } = await usePostgresAuthState(pgPool, 'watchstore_session');
   const { version } = await fetchLatestBaileysVersion();
 
+  // Use CacheableSignalKeyStore if available (reduces DB calls for signal keys)
+  const authState = typeof makeCacheableSignalKeyStore === 'function'
+    ? { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) }
+    : state;
+
   sock = makeWASocket({
     version,
-    auth: state,
+    auth: authState,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
+    // ── Delivery reliability ─────────────────────────────────────────────
+    // Tracks retry attempts per message; Baileys uses this to back off
+    msgRetryCounterCache,
+    // Allows Baileys to re-send the original payload when retrying
+    getMessage: async (key) => {
+      if (messageStore) {
+        return messageStore.getMessage(key);
+      }
+      return undefined;
+    },
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -385,6 +413,13 @@ async function startBaileys() {
   // Incoming Message Listener (Detect Confirm Order button, typed YES / ہاں, and Screenshots)
   sock.ev.on('messages.upsert', async (m) => {
     if (m.type !== 'notify') return;
+
+    // Persist all messages so Baileys can retry delivery on reconnect
+    if (messageStore) {
+      for (const msg of m.messages) {
+        await messageStore.saveMessage(msg);
+      }
+    }
 
     for (const msg of m.messages) {
       if (!msg.message || msg.key.fromMe) continue;
