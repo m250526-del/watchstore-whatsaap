@@ -306,37 +306,26 @@ app.post('/api/send-verification', async (req, res) => {
       paymentDetails,
     });
 
-    // Message #1 (Bilingual English + Urdu with dual instructions)
+    // Message #1 (Bilingual English + Urdu — plain text only; WhatsApp/Baileys no longer
+    // reliably renders interactive buttons on unofficial clients, so we rely on typed replies)
     const msg1Text =
       `Hello ${customerName || 'Customer'}!\n\n` +
       `We have received your order #${orderId}.\n` +
       `Order Total: Rs. ${amount || '0'}\n\n` +
-      `Please confirm your order by pressing the button below, or simply reply YES.\n\n` +
+      `Please reply YES to confirm your order.\n\n` +
       `------------------------------\n` +
       `السلام علیکم ${customerName || 'محترم'}!\n\n` +
       `ہمیں آپ کا آرڈر #${orderId} موصول ہو گیا ہے۔\n` +
       `آرڈر کی کل رقم: Rs. ${amount || '0'}\n\n` +
-      `براہِ کرم نیچے دیا گیا بٹن دبا کر اپنے آرڈر کی تصدیق کریں، یا صرف YES لکھ کر جواب دیں۔`;
-
-    const buttons = [
-      {
-        buttonId: `confirm_order_${orderId}`,
-        buttonText: { displayText: 'Confirm Order' },
-        type: 1,
-      },
-    ];
+      `براہِ کرم اپنے آرڈر کی تصدیق کے لیے YES لکھ کر جواب دیں۔`;
 
     try {
-      console.log(`Sending interactive button Message #1 to ${result.jid}...`);
-      await sock.sendMessage(result.jid, {
-        text: msg1Text,
-        buttons: buttons,
-        headerType: 1,
-      });
-      console.log(`✅ Interactive Message #1 sent to ${result.jid}`);
-    } catch (btnErr) {
-      console.error('❌ INTERACTIVE BUTTON SEND FAILED:', btnErr);
-      throw btnErr; // Do NOT swallow error; re-throw so full stack trace is visible in Render logs
+      console.log(`Sending Message #1 to ${result.jid}...`);
+      await sock.sendMessage(result.jid, { text: msg1Text });
+      console.log(`✅ Message #1 sent to ${result.jid}`);
+    } catch (sendErr) {
+      console.error('❌ MESSAGE #1 SEND FAILED:', sendErr);
+      throw sendErr;
     }
 
     return res.json({ success: true, reason: 'sent' });
@@ -424,21 +413,20 @@ async function startBaileys() {
       if (!msg.message || msg.key.fromMe) continue;
 
       const fromJid = msg.key.remoteJid;
-      if (!fromJid || !fromJid.endsWith('@s.whatsapp.net')) continue;
+      if (!fromJid) continue;
 
-      const senderPhone = normalizePakistaniPhone(fromJid);
+      // WhatsApp can address messages via an opaque "@lid" JID instead of the classic
+      // phone-number "@s.whatsapp.net" JID. The phone-based JID, when available, may be in
+      // remoteJid OR remoteJidAlt depending on addressing mode — check both.
+      const altJid = msg.key.remoteJidAlt;
+      const phoneJid = [fromJid, altJid].find((j) => j && j.endsWith('@s.whatsapp.net'));
+      if (!phoneJid) continue; // no phone number available from this message at all
 
-      // Parse interactive button responses across Baileys payload variations
-      const selectedButtonId =
-        msg.message?.buttonsResponseMessage?.selectedButtonId ||
-        msg.message?.templateButtonReplyMessage?.selectedId ||
-        msg.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ||
-        '';
+      const senderPhone = normalizePakistaniPhone(phoneJid);
 
       const textContent = (
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
-        msg.message?.buttonsResponseMessage?.selectedDisplayText ||
         ''
       ).trim().toLowerCase();
 
@@ -463,12 +451,7 @@ async function startBaileys() {
         continue;
       }
 
-      // 1. Button Response Detection
-      const isButtonConfirm =
-        (selectedButtonId && selectedButtonId.includes('confirm_order')) ||
-        (selectedButtonId && selectedButtonId.includes(pendingOrder.order_id));
-
-      // 2. Typed YES / English Confirmation Detection (trimmed & case-insensitive)
+      // 1. Typed YES / English Confirmation Detection (trimmed & case-insensitive)
       const isYesConfirm =
         textContent === 'yes' ||
         textContent === 'y' ||
@@ -485,8 +468,8 @@ async function startBaileys() {
         textContent.includes('جی') ||
         textContent.includes('تصدیق');
 
-      if ((isButtonConfirm || isYesConfirm || isUrduConfirm) && pendingOrder.status === 'pending_confirmation') {
-        console.log(`📩 Valid order confirmation received via ${isButtonConfirm ? 'BUTTON' : isYesConfirm ? 'TYPED YES' : 'URDU TEXT'} for order #${pendingOrder.order_id}`);
+      if ((isYesConfirm || isUrduConfirm) && pendingOrder.status === 'pending_confirmation') {
+        console.log(`📩 Valid order confirmation received via ${isYesConfirm ? 'TYPED YES' : 'URDU TEXT'} for order #${pendingOrder.order_id}`);
         // Execute unified confirmation handler
         await handleOrderConfirmation(pendingOrder, fromJid);
       } else if (isImage && pendingOrder.status === 'confirmed') {
