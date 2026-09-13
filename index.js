@@ -32,17 +32,13 @@ let latestQr = null;
 const pendingOrdersCache = new Map();
 
 // ── Canonical Pakistani Phone Normalizer ──────────────────────────────────
+// Simple digit extraction only — no more guessing/correcting. WordPress now
+// always sends a complete, correctly-prefixed international number (via its
+// own country-code dropdown), and WhatsApp itself always reports sender
+// numbers in full international format. Kept as its own function (rather
+// than inlining everywhere) so all call sites stay unchanged.
 function normalizePakistaniPhone(phoneInput) {
-  let digits = String(phoneInput || '').replace(/\D/g, '');
-  if (digits.startsWith('0092')) {
-    digits = digits.substring(2);
-  }
-  if (digits.startsWith('0')) {
-    digits = '92' + digits.substring(1);
-  } else if (digits.length === 10 && digits.startsWith('3')) {
-    digits = '92' + digits;
-  }
-  return digits;
+  return String(phoneInput || '').replace(/\D/g, '');
 }
 
 function normalizeToJid(phone) {
