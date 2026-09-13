@@ -66,6 +66,7 @@ async function initDb() {
         status VARCHAR(50) DEFAULT 'pending_confirmation',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+      ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS whatsapp_phone VARCHAR(50);
     `);
     console.log('✅ pending_orders table initialized.');
 
@@ -75,6 +76,67 @@ async function initDb() {
   }
 }
 initDb();
+
+function extractOrderIdFromMessage(msg) {
+  const candidates = [
+    msg.message?.conversation || '',
+    msg.message?.extendedTextMessage?.text || '',
+    msg.message?.buttonsResponseMessage?.selectedButtonId || '',
+    msg.message?.buttonsResponseMessage?.selectedDisplayText || '',
+    msg.message?.templateButtonReplyMessage?.selectedId || '',
+    msg.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson || ''
+  ];
+
+  for (const value of candidates) {
+    const text = String(value || '');
+
+    // Existing button format:
+    // confirm_order_46
+    const buttonMatch = text.match(/confirm_order_(\d+)/i);
+    if (buttonMatch) {
+      return buttonMatch[1];
+    }
+
+    // Existing prefilled message / typed message:
+    // order #46
+    // Order #46
+    // order 46
+    const orderMatch = text.match(/\border\s*#?\s*(\d+)\b/i);
+    if (orderMatch) {
+      return orderMatch[1];
+    }
+  }
+
+  return null;
+}
+
+async function getOrderById(orderId) {
+  try {
+    const res = await pgPool.query(
+      'SELECT * FROM pending_orders WHERE order_id = $1 LIMIT 1',
+      [String(orderId)]
+    );
+    return res.rows.length ? res.rows[0] : null;
+  } catch (err) {
+    console.error('Error fetching order by ID:', err);
+    return null;
+  }
+}
+
+async function associateWhatsAppWithOrder(orderId, whatsappPhone) {
+  try {
+    await pgPool.query(
+      'UPDATE pending_orders SET whatsapp_phone = $1 WHERE order_id = $2',
+      [whatsappPhone, String(orderId)]
+    );
+
+    console.log(
+      `✅ Associated WhatsApp ${whatsappPhone} with order #${orderId}`
+    );
+  } catch (err) {
+    console.error('Error associating WhatsApp number with order:', err);
+  }
+}
 
 async function savePendingOrder(orderData) {
   const { orderId, phone, customerName, amount, paymentMethod, paymentDetails } = orderData;
@@ -137,10 +199,17 @@ async function getPendingOrder(phoneOrDigits) {
     return pendingOrdersCache.get(localFormat);
   }
 
-  // 2. Query PostgreSQL Database (supports canonical 923..., local 03..., raw input, and order_id)
+  // 2. Query PostgreSQL Database (supports whatsapp_phone, canonical 923..., local 03..., raw input, and order_id)
   try {
     const res = await pgPool.query(
-      `SELECT * FROM pending_orders WHERE phone = $1 OR phone = $2 OR phone = $3 OR order_id = $3 ORDER BY created_at DESC LIMIT 1`,
+      `SELECT * FROM pending_orders 
+       WHERE whatsapp_phone = $1 OR whatsapp_phone = $2
+          OR phone = $1 OR phone = $2 OR phone = $3 OR order_id = $3
+       ORDER BY
+         CASE WHEN whatsapp_phone = $1 OR whatsapp_phone = $2 THEN 1 ELSE 2 END,
+         CASE WHEN status = 'confirmed' THEN 1 ELSE 2 END,
+         created_at DESC
+       LIMIT 1`,
       [normalizedDigits, localFormat, rawInput]
     );
     if (res.rows.length > 0) {
@@ -149,6 +218,9 @@ async function getPendingOrder(phoneOrDigits) {
       pendingOrdersCache.set(normalizedDigits, row);
       pendingOrdersCache.set(row.phone, row);
       pendingOrdersCache.set(row.order_id, row);
+      if (row.whatsapp_phone) {
+        pendingOrdersCache.set(row.whatsapp_phone, row);
+      }
       return row;
     }
   } catch (err) {
@@ -461,25 +533,27 @@ async function startBaileys() {
         textContent
       });
 
-      // Look for an explicit Order ID anywhere in the message text FIRST — this is
-      // present in every automated pre-filled WhatsApp message (and can be typed
-      // manually too), so it's the most reliable signal regardless of which phone
-      // number sent it. Checking this before anything else also means we never
-      // reply to a random message that references no real, still-open order.
+      const messageOrderId = extractOrderIdFromMessage(msg);
       let pendingOrder = null;
       let matchedByOrderId = false;
-      const candidateIds = (textContent.match(/\d{1,10}/g) || []);
-      for (const candidate of candidateIds) {
-        const found = await getPendingOrder(candidate);
-        if (found && String(found.order_id) === candidate) {
-          pendingOrder = found;
+
+      if (messageOrderId) {
+        pendingOrder = await getOrderById(messageOrderId);
+
+        if (pendingOrder) {
+          // The sender of this order-specific WhatsApp message is the
+          // customer's actual WhatsApp number.
+          await associateWhatsAppWithOrder(
+            pendingOrder.order_id,
+            senderPhone
+          );
+
+          // Keep the current object synchronized for the rest of this handler.
+          pendingOrder.whatsapp_phone = senderPhone;
           matchedByOrderId = true;
-          break;
         }
       }
 
-      // Fall back to phone-based lookup — covers a bare typed "yes" / "ہاں" reply
-      // (no order number in it) from a number already on file for an open order.
       if (!pendingOrder) {
         pendingOrder = await getPendingOrder(senderPhone);
       }
