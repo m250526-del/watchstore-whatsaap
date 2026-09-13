@@ -439,19 +439,39 @@ async function startBaileys() {
         textContent
       });
 
-      // Lookup pending order with canonical normalization & database fallback
-      const pendingOrder = await getPendingOrder(senderPhone);
+      // Look for an explicit Order ID anywhere in the message text FIRST — this is
+      // present in every automated pre-filled WhatsApp message (and can be typed
+      // manually too), so it's the most reliable signal regardless of which phone
+      // number sent it. Checking this before anything else also means we never
+      // reply to a random message that references no real, still-open order.
+      let pendingOrder = null;
+      let matchedByOrderId = false;
+      const candidateIds = (textContent.match(/\d{1,10}/g) || []);
+      for (const candidate of candidateIds) {
+        const found = await getPendingOrder(candidate);
+        if (found && String(found.order_id) === candidate) {
+          pendingOrder = found;
+          matchedByOrderId = true;
+          break;
+        }
+      }
+
+      // Fall back to phone-based lookup — covers a bare typed "yes" / "ہاں" reply
+      // (no order number in it) from a number already on file for an open order.
+      if (!pendingOrder) {
+        pendingOrder = await getPendingOrder(senderPhone);
+      }
 
       console.log('[WA CONFIRM DEBUG] pending order:', pendingOrder
-        ? pendingOrder.order_id
+        ? `${pendingOrder.order_id} (matched by ${matchedByOrderId ? 'ORDER ID' : 'PHONE'})`
         : 'NOT FOUND'
       );
 
       if (!pendingOrder) {
-        continue;
+        continue; // No real, known, open order referenced — ignore, no reply
       }
 
-      // 1. Typed YES / English Confirmation Detection (trimmed & case-insensitive)
+      // 1. Typed YES / English Confirmation Detection
       const isYesConfirm =
         textContent === 'yes' ||
         textContent === 'y' ||
@@ -462,15 +482,18 @@ async function startBaileys() {
         textContent === 'okay' ||
         textContent === '1';
 
-      // 3. Typed Urdu Confirmation Detection (ہاں / ہاں جی / جی ہاں)
+      // 2. Typed Urdu Confirmation Detection
       const isUrduConfirm =
         textContent.includes('ہاں') ||
         textContent.includes('جی') ||
         textContent.includes('تصدیق');
 
-      if ((isYesConfirm || isUrduConfirm) && pendingOrder.status === 'pending_confirmation') {
-        console.log(`📩 Valid order confirmation received via ${isYesConfirm ? 'TYPED YES' : 'URDU TEXT'} for order #${pendingOrder.order_id}`);
-        // Execute unified confirmation handler
+      const shouldConfirm =
+        pendingOrder.status === 'pending_confirmation' &&
+        (matchedByOrderId || isYesConfirm || isUrduConfirm);
+
+      if (shouldConfirm) {
+        console.log(`📩 Order confirmation for #${pendingOrder.order_id} via ${matchedByOrderId ? 'ORDER ID' : (isYesConfirm ? 'TYPED YES' : 'URDU TEXT')}`);
         await handleOrderConfirmation(pendingOrder, fromJid);
       } else if (isImage && pendingOrder.status === 'confirmed') {
         // Customer sent payment screenshot after confirmation.
