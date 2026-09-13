@@ -304,6 +304,20 @@ app.post('/api/send-verification', async (req, res) => {
 
     const jid = normalizeToJid(phone);
 
+    // Always persist the order FIRST, regardless of what the onWhatsApp check
+    // returns — that check is known to be unreliable on unofficial WhatsApp
+    // libraries, and the customer may also end up confirming from a different
+    // WhatsApp number/device by typing their Order ID, so the order must exist
+    // in the database no matter what happens next.
+    await savePendingOrder({
+      phone,
+      orderId,
+      amount,
+      customerName,
+      paymentMethod,
+      paymentDetails,
+    });
+
     const [result] = await sock.onWhatsApp(jid);
     if (!result || !result.exists) {
       return res.json({
@@ -313,16 +327,6 @@ app.post('/api/send-verification', async (req, res) => {
         secondaryNumber: SECONDARY_NUMBER,
       });
     }
-
-    // Persist order details for incoming confirmation
-    await savePendingOrder({
-      phone,
-      orderId,
-      amount,
-      customerName,
-      paymentMethod,
-      paymentDetails,
-    });
 
     // Message #1 (Bilingual English + Urdu — plain text only; WhatsApp/Baileys no longer
     // reliably renders interactive buttons on unofficial clients, so we rely on typed replies)
