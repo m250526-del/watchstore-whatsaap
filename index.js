@@ -588,17 +588,27 @@ async function startBaileys() {
         console.log(`📩 Order confirmation for #${pendingOrder.order_id} via ${matchedByOrderId ? 'ORDER ID' : (isYesConfirm ? 'TYPED YES' : 'URDU TEXT')}`);
         await handleOrderConfirmation(pendingOrder, fromJid);
       } else if (isImage && pendingOrder.status === 'confirmed') {
-        // Customer sent payment screenshot after confirmation.
-        // Acknowledge ONCE, then mark as acknowledged so repeated screenshots
-        // don't trigger repeated automated replies (WhatsApp spam-detection risk).
-        const ackMsg =
-          `Thank you! We have received your payment screenshot. Our team will manually verify the payment and update your order shortly.\n\n` +
-          `------------------------------\n` +
-          `شکریہ! ہمیں آپ کا اسکرین شاٹ موصول ہو گیا ہے۔ ہماری ٹیم جلد آپ کی ادائیگی کی تصدیق کر کے آرڈر پروسیس کرے گی۔`;
+        // COD orders have no payment to verify — nothing meaningful to say
+        // about an image sent for one, so just ignore it silently.
+        const isAdvanceOrder =
+          pendingOrder.payment_method === 'raast_transfer' ||
+          pendingOrder.payment_method === 'advance';
 
-        await sock.sendMessage(fromJid, { text: ackMsg });
-        await updateOrderStatus(pendingOrder.order_id, 'screenshot_received');
-        console.log(`✅ Screenshot acknowledged once for order #${pendingOrder.order_id}; further automated replies suppressed for this order.`);
+        if (isAdvanceOrder) {
+          // Customer sent payment screenshot after confirmation.
+          // Acknowledge ONCE, then mark as acknowledged so repeated screenshots
+          // don't trigger repeated automated replies (WhatsApp spam-detection risk).
+          const ackMsg =
+            `Thank you! We have received your payment screenshot. Our team will manually verify the payment and update your order shortly.\n\n` +
+            `------------------------------\n` +
+            `شکریہ! ہمیں آپ کا اسکرین شاٹ موصول ہو گیا ہے۔ ہماری ٹیم جلد آپ کی ادائیگی کی تصدیق کر کے آرڈر پروسیس کرے گی۔`;
+
+          await sock.sendMessage(fromJid, { text: ackMsg });
+          await updateOrderStatus(pendingOrder.order_id, 'screenshot_received');
+          console.log(`✅ Screenshot acknowledged once for order #${pendingOrder.order_id}; further automated replies suppressed for this order.`);
+        } else {
+          console.log(`ℹ️ Ignored image for COD order #${pendingOrder.order_id} — no payment verification needed.`);
+        }
       }
     }
   });
