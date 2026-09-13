@@ -243,12 +243,30 @@ const app = express();
 app.use(express.json());
 
 app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/qr') return next();
+  if (req.path === '/health' || req.path === '/qr' || req.path === '/api/order-status') return next();
   const key = req.header('X-API-Key');
   if (!key || key !== API_KEY) {
     return res.status(401).json({ success: false, reason: 'unauthorized' });
   }
   next();
+});
+
+app.get('/api/order-status', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const orderId = req.query.orderId;
+  if (!orderId) {
+    return res.status(400).json({ success: false, reason: 'missing_order_id' });
+  }
+  try {
+    const order = await getPendingOrder(String(orderId));
+    if (!order) {
+      return res.json({ success: true, status: 'not_found' });
+    }
+    return res.json({ success: true, status: order.status });
+  } catch (err) {
+    console.error('order-status lookup error:', err);
+    return res.status(500).json({ success: false, reason: 'server_error' });
+  }
 });
 
 app.get('/health', (req, res) => {
