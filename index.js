@@ -23,6 +23,7 @@ const pgPool = new Pool({
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
+const QR_TOKEN = process.env.QR_TOKEN;
 const SECONDARY_NUMBER = process.env.SECONDARY_NUMBER;
 
 let sock = null;
@@ -311,7 +312,13 @@ const app = express();
 app.use(express.json());
 
 app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/qr' || req.path === '/api/order-status') return next();
+  if (req.path === '/health' || req.path === '/api/order-status') return next();
+  if (req.path === '/qr') {
+    if (!QR_TOKEN || req.query.token !== QR_TOKEN) {
+      return res.status(401).send('unauthorized');
+    }
+    return next();
+  }
   const key = req.header('X-API-Key');
   if (!key || key !== API_KEY) {
     return res.status(401).json({ success: false, reason: 'unauthorized' });
