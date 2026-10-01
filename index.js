@@ -25,6 +25,7 @@ const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
 const QR_TOKEN = process.env.QR_TOKEN;
 const SECONDARY_NUMBER = process.env.SECONDARY_NUMBER;
+const OWNER_NOTIFY_NUMBER = process.env.OWNER_NOTIFY_NUMBER;
 
 let sock = null;
 let connectionState = 'connecting';
@@ -384,6 +385,14 @@ app.post('/api/send-verification', async (req, res) => {
     // libraries, and the customer may also end up confirming from a different
     // WhatsApp number/device by typing their Order ID, so the order must exist
     // in the database no matter what happens next.
+    if (OWNER_NOTIFY_NUMBER && connectionState === 'open' && sock) {
+      const ownerJid = normalizeToJid(OWNER_NOTIFY_NUMBER);
+      const ownerMsg = `New order #${orderId}\nAmount: Rs. ${amount || '0'}\nCustomer: ${customerName || 'N/A'}\nPhone: ${phone}\nMethod: ${paymentMethod || 'N/A'}`;
+      sock.sendMessage(ownerJid, { text: ownerMsg }).catch((err) => {
+        console.error('Owner notify failed:', err);
+      });
+    }
+
     await savePendingOrder({
       phone,
       orderId,
