@@ -65,6 +65,7 @@ async function initDb() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
       ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS whatsapp_phone VARCHAR(50);
+      ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_url TEXT;
     `);
     console.log('✅ pending_orders table initialized.');
 
@@ -137,7 +138,7 @@ async function associateWhatsAppWithOrder(orderId, whatsappPhone) {
 }
 
 async function savePendingOrder(orderData) {
-  const { orderId, phone, customerName, amount, paymentMethod, paymentDetails } = orderData;
+  const { orderId, phone, customerName, amount, paymentMethod, paymentDetails, orderUrl } = orderData;
   const digits = normalizePakistaniPhone(phone);
 
   const record = {
@@ -148,6 +149,7 @@ async function savePendingOrder(orderData) {
     payment_method: paymentMethod || 'raast_transfer',
     payment_details: paymentDetails || {},
     status: 'pending_confirmation',
+    order_url: orderUrl || '',
   };
 
   pendingOrdersCache.set(digits, record);
@@ -155,8 +157,8 @@ async function savePendingOrder(orderData) {
 
   try {
     await pgPool.query(
-      `INSERT INTO pending_orders (order_id, phone, customer_name, amount, payment_method, payment_details, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO pending_orders (order_id, phone, customer_name, amount, payment_method, payment_details, status, order_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (order_id) DO UPDATE SET
          phone = EXCLUDED.phone,
          customer_name = EXCLUDED.customer_name,
@@ -164,6 +166,7 @@ async function savePendingOrder(orderData) {
          payment_method = EXCLUDED.payment_method,
          payment_details = EXCLUDED.payment_details,
          status = EXCLUDED.status,
+         order_url = EXCLUDED.order_url,
          created_at = CURRENT_TIMESTAMP`,
       [
         record.order_id,
@@ -173,6 +176,7 @@ async function savePendingOrder(orderData) {
         record.payment_method,
         JSON.stringify(record.payment_details),
         record.status,
+        record.order_url,
       ]
     );
     console.log(`✅ Saved pending order #${record.order_id} for canonical phone ${digits}`);
@@ -259,6 +263,12 @@ async function handleOrderConfirmation(pendingOrder, fromJid) {
     : (pendingOrder.payment_details || {});
 
   const isAdvance = pendingOrder.payment_method === 'raast_transfer' || pendingOrder.payment_method === 'advance';
+  let trackLine = '';
+  let trackLineUrdu = '';
+  if (pendingOrder.order_url) {
+    trackLine = `\nTrack your order: ${pendingOrder.order_url}\n`;
+    trackLineUrdu = `\nاپنے آرڈر کی صورتحال دیکھیں: ${pendingOrder.order_url}\n`;
+  }
 
   if (isAdvance) {
     let bankBlock = '';
@@ -283,15 +293,17 @@ async function handleOrderConfirmation(pendingOrder, fromJid) {
       (bankBlock ? `${bankBlock}\n` : '') +
       (epBlock ? `${epBlock}\n` : '') +
       (jcBlock ? `${jcBlock}\n` : '') +
-      `Please make the payment and send us a screenshot of the payment receipt here on WhatsApp.\n\n` +
-      `------------------------------\n` +
+      `Please make the payment and send us a screenshot of the payment receipt here on WhatsApp.\n` +
+      trackLine +
+      `\n------------------------------\n` +
       `آپ کے آرڈر #${pendingOrder.order_id} کی تصدیق ہو گئی ہے۔\n\n` +
       `ادا کرنے کی رقم: Rs. ${pendingOrder.amount}\n\n` +
       `ادائیگی کی تفصیلات:\n\n` +
       (bankBlock ? `${bankBlock}\n` : '') +
       (epBlock ? `${epBlock}\n` : '') +
       (jcBlock ? `${jcBlock}\n` : '') +
-      `براہِ کرم ادائیگی کرنے کے بعد ادائیگی کی رسید کا اسکرین شاٹ اسی WhatsApp پر بھیج دیں۔`;
+      `براہِ کرم ادائیگی کرنے کے بعد ادائیگی کی رسید کا اسکرین شاٹ اسی WhatsApp پر بھیج دیں۔` +
+      trackLineUrdu;
 
     await sock.sendMessage(fromJid, { text: msg2Advance });
     console.log(`✅ Message #2 (Advance Payment) sent to ${fromJid} for order #${pendingOrder.order_id}`);
@@ -299,10 +311,12 @@ async function handleOrderConfirmation(pendingOrder, fromJid) {
     // COD Message #2
     const msg2Cod =
       `Your order #${pendingOrder.order_id} has been confirmed.\n\n` +
-      `We will process your Cash on Delivery order.\n\n` +
-      `------------------------------\n` +
+      `We will process your Cash on Delivery order.\n` +
+      trackLine +
+      `\n------------------------------\n` +
       `آپ کا آرڈر #${pendingOrder.order_id} کنفرم ہو گیا ہے۔\n\n` +
-      `آپ کا Cash on Delivery آرڈر اب پروسیس کیا جائے گا۔`;
+      `آپ کا Cash on Delivery آرڈر اب پروسیس کیا جائے گا۔` +
+      trackLineUrdu;
 
     await sock.sendMessage(fromJid, { text: msg2Cod });
     console.log(`✅ Message #2 (COD) sent to ${fromJid} for order #${pendingOrder.order_id}`);
@@ -363,7 +377,7 @@ app.get('/qr', async (req, res) => {
 
 app.post('/api/send-verification', async (req, res) => {
   try {
-    const { phone, orderId, amount, customerName, paymentMethod, paymentDetails } = req.body;
+    const { phone, orderId, amount, customerName, paymentMethod, paymentDetails, orderUrl } = req.body;
 
     if (!phone || !orderId) {
       return res.status(400).json({ success: false, reason: 'missing_fields' });
@@ -400,6 +414,7 @@ app.post('/api/send-verification', async (req, res) => {
       customerName,
       paymentMethod,
       paymentDetails,
+      orderUrl,
     });
 
     const [result] = await sock.onWhatsApp(jid);
@@ -414,16 +429,24 @@ app.post('/api/send-verification', async (req, res) => {
 
     // Message #1 (Bilingual English + Urdu — plain text only; WhatsApp/Baileys no longer
     // reliably renders interactive buttons on unofficial clients, so we rely on typed replies)
+    let orderUrlLine = '';
+    let orderUrlLineUrdu = '';
+    if (orderUrl) {
+      orderUrlLine = `\nTrack your order: ${orderUrl}\n`;
+      orderUrlLineUrdu = `\nاپنے آرڈر کی صورتحال دیکھیں: ${orderUrl}\n`;
+    }
     const msg1Text =
       `Hello ${customerName || 'Customer'}!\n\n` +
       `We have received your order #${orderId}.\n` +
-      `Order Total: Rs. ${amount || '0'}\n\n` +
-      `Please reply YES to confirm your order.\n\n` +
+      `Order Total: Rs. ${amount || '0'}\n` +
+      orderUrlLine +
+      `\nPlease reply YES to confirm your order.\n\n` +
       `------------------------------\n` +
       `السلام علیکم ${customerName || 'محترم'}!\n\n` +
       `ہمیں آپ کا آرڈر #${orderId} موصول ہو گیا ہے۔\n` +
-      `آرڈر کی کل رقم: Rs. ${amount || '0'}\n\n` +
-      `براہِ کرم اپنے آرڈر کی تصدیق کے لیے YES لکھ کر جواب دیں۔`;
+      `آرڈر کی کل رقم: Rs. ${amount || '0'}\n` +
+      orderUrlLineUrdu +
+      `\nبراہِ کرم اپنے آرڈر کی تصدیق کے لیے YES لکھ کر جواب دیں۔`;
 
     try {
       console.log(`Sending Message #1 to ${result.jid}...`);
